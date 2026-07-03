@@ -4,6 +4,7 @@
 .python-version
 .mcpregistry_*
 *.mcpb
+.vercel
 tests/e2e/fixtures/*.duckdb
 tests/e2e/fixtures/*.duckdb.wal
 
@@ -181,3 +182,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+.vercel

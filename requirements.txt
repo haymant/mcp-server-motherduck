@@ -1,0 +1,5 @@
+duckdb==1.5.3
+fastmcp>=3.2
+click>=8.1.8
+pytz>=2025.2
+starlette>=0.37.0

@@ -71,6 +71,7 @@ class DatabaseClient:
         # self.db_path may include the motherduck_token for MD connections, so it
         # must never be returned in tool responses or logged.
         self.user_db_path = db_path
+        self._md_token_deferred = False
         self.db_path, self.db_type = self._resolve_db_path_type(
             db_path, motherduck_token, saas_mode
         )
@@ -208,6 +209,27 @@ class DatabaseClient:
             self._execute_init_sql(conn)
             return conn
 
+        # Resolve deferred MotherDuck token (supplied per-request via env var
+        # by BearerAuthMiddleware in the Vercel backend).
+        if self._md_token_deferred:
+            token = os.environ.get("MOTHERDUCK_TOKEN") or os.environ.get("motherduck_token")
+            if not token:
+                raise ValueError(
+                    "MotherDuck token is required. "
+                    "Include it in the Authorization: Bearer <token> header."
+                )
+            md_params = (
+                f"&{self._motherduck_connection_parameters}"
+                if self._motherduck_connection_parameters
+                else ""
+            )
+            saas_param = "&saas_mode=true" if self._saas_mode else ""
+            self.db_path = (
+                f"md:?motherduck_token={token}{saas_param}{md_params}"
+            )
+            self._md_token_deferred = False
+            logger.info("Deferred MotherDuck token resolved from request header")
+
         # For MotherDuck, pass read_only flag; for in-memory it's not applicable
         read_only_flag = self._read_only if self.db_type == "motherduck" else False
 
@@ -301,9 +323,12 @@ class DatabaseClient:
                     "motherduck",
                 )
             else:
-                raise ValueError(
-                    "Please set the `motherduck_token` or `MOTHERDUCK_TOKEN` as an environment variable or pass it as an argument with `--motherduck-token` when using `md:` as db_path."
-                )
+                # Token not available at init time — the Vercel backend
+                # supplies it per-request via env var.  Defer resolution to
+                # _initialize_connection.
+                logger.info("MotherDuck token deferred — will resolve at connection time")
+                self._md_token_deferred = True
+                return (db_path, "motherduck")
 
         if db_path == ":memory:":
             return db_path, "duckdb"

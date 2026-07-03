@@ -236,7 +236,7 @@ For production deployments with third-party access, we recommend **[MotherDuck R
 
 | Variable | Description |
 |----------|-------------|
-| `motherduck_token` or `MOTHERDUCK_TOKEN` | MotherDuck access token (alternative to `--motherduck-token`) |
+| `motherduck_token` or `MOTHERDUCK_TOKEN` | MotherDuck access token for stdio/local mode (alternative to `--motherduck-token`). **Not needed** for Vercel deployments — the token comes from the `Authorization: Bearer` header. |
 | `HOME` | Used by DuckDB for extensions and config. Override with `--home-dir` if not set. |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 database connections |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 database connections |
@@ -244,10 +244,151 @@ For production deployments with third-party access, we recommend **[MotherDuck R
 | `AWS_DEFAULT_REGION` | AWS region for S3 connections |
 | `AWS_ENDPOINT` | AWS endpoint for S3 connections |
 
+## Running on Vercel (Streamable HTTP)
+
+This server can run as a remote MCP server over **Streamable HTTP**,
+making it reachable over the network so MCP clients (Claude Desktop, MCP Inspector, etc.)
+can connect to a hosted URL.
+
+### How it works
+
+- `backend/main.py` creates the FastMCP server and exposes it as an ASGI app via
+  `mcp.http_app(path="/mcp", stateless_http=True)`. `stateless_http=True` is
+  required for serverless platforms because each request must be self-contained.
+- `api/main.py` is a thin re-export that Vercel's Python runtime auto-detects
+  (it looks for an ASGI `app` callable in `api/`).
+- `vercel.json` sets the build configuration — no `rootDirectory` override is
+  needed since `api/main.py` lives at the project root.
+- The **public MCP endpoint** is:
+  ```
+  https://<your-deployment>.vercel.app/mcp
+  ```
+
+### Authentication
+
+The server uses the **`Authorization: Bearer <token>`** header as its sole
+authentication mechanism.  The Bearer token **is** your MotherDuck access
+token — there is no separate API key.  Every request (except CORS preflight)
+must include this header.  Requests without it receive `403 Forbidden`.
+
+The token is passed directly to DuckDB's MotherDuck connector, so it must be
+a valid MotherDuck token (either a regular read-write token or a
+[read-scaling token](https://motherduck.com/docs/key-tasks/authenticating-and-connecting-to-motherduck/authenticating-to-motherduck/#read-scaling-tokens)).
+
+No `MCP_API_KEY` or `MOTHERDUCK_TOKEN` environment variable is needed on the
+server — the token travels exclusively in the request header.
+
+### Local testing with `vercel dev`
+
+1. **Set Python version to >= 3.12** (required by Vercel runtime):
+
+   ```bash
+   uv python pin 3.12
+   ```
+
+2. **Run the dev server:**
+
+   ```bash
+   vercel dev
+   ```
+
+   This starts a local dev server at `http://localhost:3000/mcp`.
+
+3. **Test the endpoint:**
+
+   The Bearer token **must** be a valid MotherDuck token:
+   ```bash
+   curl -X POST http://localhost:3000/mcp \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     -H "Authorization: Bearer <YOUR_MOTHERDUCK_TOKEN>" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+   ```
+
+### Local testing with uvicorn (direct, no Vercel)
+
+```bash
+uv run uvicorn backend.main:app --host 0.0.0.0 --port 8001
+```
+
+Test:
+```bash
+curl -X POST http://localhost:8001/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer <YOUR_MOTHERDUCK_TOKEN>" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+### Deploy to Vercel
+
+1. **Import the repo** into Vercel, or deploy from the CLI:
+   ```bash
+   vercel --prod
+   ```
+
+2. **Set the `MCP_DB_PATH` environment variable** to `md:`:
+   ```bash
+   vercel env add MCP_DB_PATH production
+   # Then enter: md:
+   ```
+
+3. **Set other environment variables** as needed (e.g. `MCP_READ_WRITE`):
+   ```bash
+   vercel env add MCP_READ_WRITE production
+   # Then enter: 1
+   ```
+
+4. **Redeploy** after setting env vars:
+   ```bash
+   vercel --prod
+   ```
+
+5. Your MCP endpoint is available at `https://<your-deployment>.vercel.app/mcp`.
+
+> **Note**: No `MOTHERDUCK_TOKEN` or `MCP_API_KEY` env var is needed. The
+> MotherDuck token is sent by the client in the `Authorization: Bearer`
+> header with every request.
+
+### Smoke-test the deployed endpoint
+
+```bash
+curl -X POST https://<your-deployment>.vercel.app/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+### Connecting from the MCP Inspector
+
+You can test the hosted server with the official
+[MCP Inspector](https://github.com/modelcontextprotocol/inspector).
+
+1. Run the Inspector (no install required):
+   ```bash
+   npx @modelcontextprotocol/inspector
+   ```
+   This opens the Inspector UI in your browser.
+
+2. In the Inspector UI, set:
+   - **Transport Type**: `Streamable HTTP`
+   - **URL**: `https://<your-deployment>.vercel.app/mcp`
+   (When testing locally with `vercel dev`, use `http://localhost:3000/mcp`.)
+
+3. If you have authentication enabled, add a **Custom Header**:
+   - **Header**: `Authorization: Bearer <your-api-key>`
+
+4. Click **Connect**, then open the **Tools** tab and click **List Tools**. You
+   should see all five tools (`execute_query`, `list_databases`, `list_tables`,
+   `list_columns`, and optionally `switch_database_connection`). Select one
+   (e.g. `list_databases`) and click **Run Tool** to verify a response.
+
 ## Troubleshooting
 
 - **`spawn uvx ENOENT`**: Specify full path to `uvx` (run `which uvx` to find it)
 - **File locked**: Make sure `--ephemeral-connections` is turned on (default: true) and that you're not connected in read-write mode
+- **Vercel deployment fails**: Ensure the project is linked (`vercel link`) and `backend/main.py` exists with a valid ASGI `app` callable
+- **"Forbidden: invalid or missing API key"**: You're sending a request without the correct `Authorization: Bearer <token>` header. Set `MCP_API_KEY` as an environment variable in Vercel or disable auth by removing the env var.
 
 ## Resources
 
